@@ -1,6 +1,6 @@
 name: CI/CD Pipeline — Booking App
 
-on:
+on: 
   push:
     branches: [ main, develop ]
   pull_request:
