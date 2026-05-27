@@ -1,6 +1,6 @@
 name: CI/CD Pipeline — Booking App
 
-on: 
+on:
   push:
     branches: [ main, develop ]
   pull_request:
@@ -8,7 +8,7 @@ on:
 
 env:
   NODE_VERSION: '20'
-
+ 
 jobs:
   # ─────────────────────────────────────────────
   # Job 1: Backend CI — Install, Migrate, Test
@@ -16,7 +16,7 @@ jobs:
   backend-test:
     name: Backend Tests (Newman API)
     runs-on: ubuntu-latest
-
+  
     services:
       postgres:
         image: postgres:16-alpine
@@ -67,6 +67,7 @@ jobs:
           NODE_ENV: test
         run: |
           cd backend
+          # รัน seed script ถ้ามี (สร้าง admin user สำหรับ test)
           node -e "
             const { PrismaClient } = require('@prisma/client');
             const bcrypt = require('bcryptjs');
@@ -95,6 +96,7 @@ jobs:
         run: |
           cd backend
           npm start &
+          # รอให้ server พร้อม
           sleep 5
           curl -f http://localhost:3001/api/rooms || (echo "Server not ready" && exit 1)
 
@@ -150,9 +152,78 @@ jobs:
         with:
           name: frontend-build
           path: frontend/dist/
+พิ่ม job ใหม่ในไฟล์ .github/workflows/ci-cd.yml ก่อน deploy jobs:
 
   # ─────────────────────────────────────────────
-  # Job 3: Deploy Frontend to Vercel
+  # Job 3: Security Scanning
+  # รันหลังจาก tests ผ่านแล้ว ก่อน deployment
+  # ─────────────────────────────────────────────
+  security-scan:
+    name: Security Scanning
+    runs-on: ubuntu-latest
+    needs: [backend-test, frontend-build]
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      # ── 1. Dependency Vulnerability Scan ──────
+      - name: Backend — npm audit
+        run: |
+          cd backend
+          npm ci
+          echo "=== Backend Dependency Audit ==="
+          npm audit --audit-level=high
+        # หยุด pipeline ถ้าพบ high/critical vulnerability
+
+      - name: Frontend — npm audit
+        run: |
+          cd frontend
+          npm ci
+          echo "=== Frontend Dependency Audit ==="
+          npm audit --audit-level=high
+
+      # ── 2. Secret Scanning ────────────────────
+      # ตรวจหา hardcoded secrets ที่อาจหลุดใน code
+      - name: Scan for hardcoded secrets (TruffleHog)
+        uses: trufflesecurity/trufflehog@main
+        with:
+          path: ./
+          base: ${{ github.event.repository.default_branch }}
+          head: HEAD
+          extra_args: --only-verified
+
+      # ── 3. OWASP Dependency Check ─────────────
+      # ตรวจสอบ dependencies กับ CVE database
+      - name: OWASP Dependency Check
+        uses: dependency-check/Dependency-Check_Action@main
+        id: depcheck
+        with:
+          project: 'booking-app'
+          path: '.'
+          format: 'HTML'
+          args: >
+            --enableRetired
+            --failOnCVSS 7
+        # failOnCVSS 7 = หยุดถ้าพบ CVSS score ≥ 7.0 (High)
+
+      - name: Upload OWASP report
+        uses: actions/upload-artifact@v4
+        if: always()  # upload แม้ว่า job จะ fail
+        with:
+          name: owasp-dependency-report
+          path: ${{ github.workspace }}/reports
+
+      # ── 4. Security Headers Check (post-deploy) ─
+      # จะทำในส่วนที่ 11 หลัง deploy แล้ว
+  # ─────────────────────────────────────────────
+  # Job 4: Deploy Frontend to Vercel
+  # (เฉพาะเมื่อ push ไปที่ main เท่านั้น)
   # ─────────────────────────────────────────────
   deploy-frontend:
     name: Deploy Frontend → Vercel
@@ -177,7 +248,8 @@ jobs:
             --yes
 
   # ─────────────────────────────────────────────
-  # Job 4: Deploy Backend to Render
+  # Job 5: Deploy Backend to Render
+  # (เฉพาะเมื่อ push ไปที่ main เท่านั้น)
   # ─────────────────────────────────────────────
   deploy-backend-render:
     name: Deploy Backend → Render
@@ -209,7 +281,8 @@ jobs:
           done
           echo "❌ Render health check failed after ${TIMEOUT}s"
           exit 1
-           # ─────────────────────────────────────────────
+
+# ─────────────────────────────────────────────
   # Job 6: Post-Deployment Smoke Tests
   # รันหลัง deploy ทั้งหมดสำเร็จ ทดสอบบน Production จริง
   # ─────────────────────────────────────────────
@@ -244,7 +317,7 @@ jobs:
         run: |
           echo "Checking frontend URL..."
           HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
-            "https://booking-app-demo-2025-delta.vercel.app")
+            "https://booking-app-demo-2025-teal.vercel.app")
           
           if [ "$HTTP_STATUS" = "200" ]; then
             echo "✅ Frontend is up (HTTP $HTTP_STATUS)"
